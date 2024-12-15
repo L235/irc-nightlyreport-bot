@@ -27,6 +27,7 @@ import threading
 import time
 import requests
 import os
+import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -55,6 +56,30 @@ class Config:
 class IRCEventHandler:
     """Handles IRC-specific events and connection management."""
     
+    def strip_irc_color_codes(self, text):
+        """
+        Remove IRC formatting codes from text.
+        
+        Removes:
+        - mIRC color codes (\x03) with optional foreground/background colors
+        - Bold (\x02), underline (\x1F), reverse (\x16), and reset (\x0F) codes
+        
+        Args:
+            text: The IRC message text to clean
+            
+        Returns:
+            str: The text with all IRC formatting codes removed
+        """
+        # Remove mIRC color codes: \x03 followed by optional fg/bg color numbers
+        text = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?', '', text)
+        
+        # Remove other formatting codes
+        format_codes = ['\x02', '\x1F', '\x16', '\x0F']
+        for code in format_codes:
+            text = text.replace(code, '')
+        
+        return text
+
     def on_connect(self, connection, event):
         """
         Handle successful connection to the IRC bouncer.
@@ -87,10 +112,12 @@ class IRCEventHandler:
         """
         Handle public messages by logging them to the appropriate channel log file.
         
+        Strips IRC formatting codes before logging to ensure clean, readable logs.
         Format: [YYYY-MM-DD HH:MM:SS] <nickname> message
         """
         channel = event.target
-        message = event.arguments[0]
+        raw_message = event.arguments[0]
+        message = self.strip_irc_color_codes(raw_message)
         nick = irc.client.NickMask(event.source).nick
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_line = f'[{timestamp}] <{nick}> {message}'
