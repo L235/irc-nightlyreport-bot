@@ -10,50 +10,64 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Configuration (loaded from environment variables)
-BOUNCER_HOST = os.getenv('BOUNCER_HOST')  # IRC bouncer host
-BOUNCER_PORT = int(os.getenv('BOUNCER_PORT', 6667))  # IRC bouncer port
-NICKNAME = os.getenv('NICKNAME')  # Bot nickname
-PASSWORD = os.getenv('PASSWORD')  # IRC bouncer password (if any)
+# Configuration
+BOUNCER_HOST = os.getenv('BOUNCER_HOST')
+BOUNCER_PORT = int(os.getenv('BOUNCER_PORT', 6667))
+NICKNAME = os.getenv('NICKNAME')
+PASSWORD = os.getenv('PASSWORD', '')
 
-MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY')  # Mailgun API key
-MAILGUN_DOMAIN = os.getenv('MAILGUN_DOMAIN')  # Mailgun domain
-TO_EMAIL = os.getenv('TO_EMAIL')  # Recipient's email address
-FROM_EMAIL = os.getenv('FROM_EMAIL')  # Sender's email address
-EMAIL_INTERVAL_DAYS = int(os.getenv('EMAIL_INTERVAL_DAYS', 1))  # Email interval in days (default 1 day)
+MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY')
+MAILGUN_DOMAIN = os.getenv('MAILGUN_DOMAIN')
+TO_EMAIL = os.getenv('TO_EMAIL')
+FROM_EMAIL = os.getenv('FROM_EMAIL')
 
-LOG_DIR = os.getenv('LOG_DIR', 'logs')  # Directory where logs will be stored
-SENT_LOGS_DIR = os.getenv('SENT_LOGS_DIR', 'sent_logs')  # Directory where sent logs will be moved
+LOG_DIR = os.getenv('LOG_DIR', 'logs')
+SENT_LOGS_DIR = os.getenv('SENT_LOGS_DIR', 'sent_logs')
+
+LAST_SENT_DAY_FILE = 'last_sent_day.txt'  # Stores the last processed day in YYYY-MM-DD format
 
 class IRCBot:
     def __init__(self):
         self.client = irc.client.Reactor()
         self.connection = self.client.server()
         self.channels = set()
-        self.nickname = NICKNAME  # Store the nickname
+        self.nickname = NICKNAME
         self.setup_logging()
-        self.schedule_next_email()
+        self.ensure_directories()
 
     def setup_logging(self):
+        logging.basicConfig(level=logging.INFO)
+
+    def ensure_directories(self):
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(SENT_LOGS_DIR, exist_ok=True)
-        logging.basicConfig(level=logging.INFO)
+
+    def connect(self):
+        try:
+            self.connection.connect(BOUNCER_HOST, BOUNCER_PORT, self.nickname, password=PASSWORD)
+        except irc.client.ServerConnectionError as e:
+            logging.error(f"Failed to connect: {e}")
+            raise SystemExit(1)
+        self.connection.add_global_handler("welcome", self.on_connect)
+        self.connection.add_global_handler("join", self.on_join)
+        self.connection.add_global_handler("whoischannels", self.on_whoischannels)
+        self.connection.add_global_handler("pubmsg", self.on_pubmsg)
 
     def on_connect(self, connection, event):
         logging.info("Connected to IRC bouncer")
-        # Send WHOIS for our own nickname to get the list of channels
+        # Retrieve current channels via WHOIS
         connection.whois([self.nickname])
 
     def on_whoischannels(self, connection, event):
-        # event.arguments[1] contains the list of channels
         channels_str = event.arguments[1]
         channels = channels_str.split()
-        # Remove channel prefixes like '@', '+', etc.
         channels = [chan.lstrip('@%+&~') for chan in channels]
         self.channels.update(channels)
         logging.info(f"Already connected to channels: {self.channels}")
-        # Start email sending thread after channels are loaded
-        self.start_email_thread()
+
+        # After channels are known, start the day-checking thread
+        # This thread will send yesterday's logs if not sent and then wait for midnight daily.
+        self.start_day_check_thread()
 
     def on_join(self, connection, event):
         channel = event.target
@@ -76,78 +90,88 @@ class IRCBot:
         with open(filename, 'a') as f:
             f.write(message + '\n')
 
-    def connect(self):
-        try:
-            self.connection.connect(BOUNCER_HOST, BOUNCER_PORT, self.nickname, password=PASSWORD)
-        except irc.client.ServerConnectionError as e:
-            logging.error(f"Failed to connect: {e}")
-            raise SystemExit(1)
-        self.connection.add_global_handler("welcome", self.on_connect)
-        self.connection.add_global_handler("join", self.on_join)
-        self.connection.add_global_handler("whoischannels", self.on_whoischannels)
-        self.connection.add_global_handler("pubmsg", self.on_pubmsg)
-
     def start(self):
-        # Start IRC client
         self.client.process_forever()
 
-    def start_email_thread(self):
-        # Start email sending thread after channels are known
-        email_thread = threading.Thread(target=self.email_logs_periodically)
-        email_thread.daemon = True
-        email_thread.start()
+    def start_day_check_thread(self):
+        # First, attempt to send any missed days immediately (including yesterday if needed).
+        self.send_missed_days_logs()
 
-    def schedule_next_email(self):
-        # Determine the next scheduled email time
-        now = datetime.now()
-        self.next_email_time_file = 'next_email_time.txt'
-        if os.path.isfile(self.next_email_time_file):
-            with open(self.next_email_time_file, 'r') as f:
-                next_send_str = f.read().strip()
-                next_send_time = datetime.strptime(next_send_str, '%Y-%m-%d %H:%M:%S')
-        else:
-            next_send_time = now
-        if next_send_time <= now:
-            # It's time to send emails now
-            self.next_email_time = now
-        else:
-            self.next_email_time = next_send_time
+        # Then start a thread that waits until midnight and sends the previous day's logs daily.
+        thread = threading.Thread(target=self.midnight_loop)
+        thread.daemon = True
+        thread.start()
 
-    def email_logs_periodically(self):
+    def midnight_loop(self):
         while True:
+            # Calculate seconds until next midnight
             now = datetime.now()
-            sleep_time = (self.next_email_time - now).total_seconds()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            self.send_email_with_logs()
-            # Schedule next email
-            self.next_email_time = self.next_email_time + timedelta(days=EMAIL_INTERVAL_DAYS)
-            with open(self.next_email_time_file, 'w') as f:
-                f.write(self.next_email_time.strftime('%Y-%m-%d %H:%M:%S'))
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            seconds_until_midnight = (tomorrow - now).total_seconds()
+            time.sleep(seconds_until_midnight)
 
-    def send_email_with_logs(self):
-        logging.info("Preparing to send email with logs")
-        # Collect logs that haven't been sent yet (logs in LOG_DIR)
-        unsent_logs = []
-        log_files = [f for f in os.listdir(LOG_DIR) if os.path.isfile(os.path.join(LOG_DIR, f))]
+            # It's now midnight, send yesterday's logs if not already sent
+            self.send_missed_days_logs()
+
+    def send_missed_days_logs(self):
+        """
+        Checks if there are any days between last_sent_day+1 and yesterday that haven't been processed,
+        and sends their logs. If no logs for that day, we still mark the day as processed.
+        """
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+
+        last_sent_day = self.get_last_sent_day()
+
+        # If last_sent_day is None (no file), we haven't sent any day yet. Let's start from last_sent_day = day before yesterday
+        if last_sent_day is None:
+            # If no file, start from at least yesterday - 1 day to ensure we try to send yesterday first
+            last_sent_day = yesterday - timedelta(days=1)
+
+        # Now send logs for each day between last_sent_day+1 and yesterday inclusive
+        day_to_send = last_sent_day + timedelta(days=1)
+        while day_to_send <= yesterday:
+            self.send_day_logs(day_to_send)
+            # Update last_sent_day after processing
+            self.set_last_sent_day(day_to_send)
+            day_to_send += timedelta(days=1)
+
+    def send_day_logs(self, day):
+        """
+        Send the logs for a specific day in YYYY-MM-DD format.
+        If no logs are found, just mark as processed without sending.
+        """
+        day_str = day.strftime('%Y-%m-%d')
+        logging.info(f"Preparing to send logs for {day_str}")
+
+        # Find all log files for this specific day in LOG_DIR
+        log_files = [
+            f for f in os.listdir(LOG_DIR)
+            if f.endswith(f"{day_str}.log") and os.path.isfile(os.path.join(LOG_DIR, f))
+        ]
+
+        if not log_files:
+            logging.info(f"No logs found for {day_str}. Nothing to send.")
+            return
+
+        # Attach the logs
+        attachments = []
         for filename in log_files:
             filepath = os.path.join(LOG_DIR, filename)
             with open(filepath, 'rb') as f:
-                unsent_logs.append(('attachment', (filename, f.read())))
-        if unsent_logs:
-            subject = f"IRC Logs up to {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            response = self.send_email(subject, "Please find attached logs.", unsent_logs)
-            if response.status_code == 200:
-                logging.info("Email sent successfully")
-                # Move sent logs to SENT_LOGS_DIR
-                for filename in log_files:
-                    src = os.path.join(LOG_DIR, filename)
-                    dst = os.path.join(SENT_LOGS_DIR, filename)
-                    os.rename(src, dst)
-            else:
-                logging.error(f"Failed to send email: {response.text}")
+                attachments.append(('attachment', (filename, f.read())))
+
+        subject = f"IRC Logs for {day_str}"
+        response = self.send_email(subject, f"Please find attached logs for {day_str}.", attachments)
+        if response.status_code == 200:
+            logging.info(f"Email sent successfully for {day_str}")
+            # Move sent logs to SENT_LOGS_DIR
+            for filename in log_files:
+                src = os.path.join(LOG_DIR, filename)
+                dst = os.path.join(SENT_LOGS_DIR, filename)
+                os.rename(src, dst)
         else:
-            logging.info("No new logs to send")
+            logging.error(f"Failed to send email for {day_str}: {response.text}")
 
     def send_email(self, subject, text, attachments):
         logging.info("Sending email")
@@ -160,7 +184,19 @@ class IRCBot:
                 'to': TO_EMAIL,
                 'subject': subject,
                 'text': text
-            })
+            }
+        )
+
+    def get_last_sent_day(self):
+        if not os.path.isfile(LAST_SENT_DAY_FILE):
+            return None
+        with open(LAST_SENT_DAY_FILE, 'r') as f:
+            day_str = f.read().strip()
+            return datetime.strptime(day_str, '%Y-%m-%d').date()
+
+    def set_last_sent_day(self, day):
+        with open(LAST_SENT_DAY_FILE, 'w') as f:
+            f.write(day.strftime('%Y-%m-%d'))
 
 if __name__ == "__main__":
     bot = IRCBot()
