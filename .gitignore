@@ -1,12 +1,12 @@
 # Environment variables
 .env
 
-# Log files
+# Log files and tracking files
 logs/
 sent_logs/
 *.log
 sent_logs.json
-next_email_time.txt
+last_sent_day.txt
 
 # Python
 __pycache__/
