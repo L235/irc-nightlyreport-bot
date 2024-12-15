@@ -1,9 +1,12 @@
+# Environment variables
 .env
-sent_logs/
-*.txt
-*.json
-*.log
+
+# Log files
 logs/
+sent_logs/
+*.log
+sent_logs.json
+next_email_time.txt
 
 # Python
 __pycache__/
@@ -11,6 +14,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -30,14 +34,14 @@ wheels/
 # Virtual Environment
 venv/
 ENV/
-env/
 .env/
-.venv/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# OS
 .DS_Store
 Thumbs.db
