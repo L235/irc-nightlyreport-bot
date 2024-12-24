@@ -31,52 +31,27 @@ import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-class ConfigManager:
-    """Manages configuration settings loaded from environment variables."""
-    
-    def __init__(self):
-        # Load environment variables
-        load_dotenv()
-        
-        # IRC Settings
-        self.bouncer_host = os.getenv('BOUNCER_HOST')
-        self.bouncer_port = int(os.getenv('BOUNCER_PORT', 6667))
-        self.nickname = os.getenv('NICKNAME')
-        self.password = os.getenv('PASSWORD', '')
+# Load environment variables from .env file
+load_dotenv()
 
-        # Email Settings
-        self.mailgun_api_key = os.getenv('MAILGUN_API_KEY')
-        self.mailgun_domain = os.getenv('MAILGUN_DOMAIN')
-        self.to_email = os.getenv('TO_EMAIL')
-        self.from_email = os.getenv('FROM_EMAIL')
+class Config:
+    """Configuration settings loaded from environment variables."""
+    # IRC Settings
+    BOUNCER_HOST = os.getenv('BOUNCER_HOST')
+    BOUNCER_PORT = int(os.getenv('BOUNCER_PORT', 6667))
+    NICKNAME = os.getenv('NICKNAME')
+    PASSWORD = os.getenv('PASSWORD', '')
 
-        # File System Settings
-        self.log_dir = os.getenv('LOG_DIR', 'logs')
-        self.sent_logs_dir = os.getenv('SENT_LOGS_DIR', 'sent_logs')
-        self.last_sent_day_file = 'last_sent_day.txt'
+    # Email Settings
+    MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY')
+    MAILGUN_DOMAIN = os.getenv('MAILGUN_DOMAIN')
+    TO_EMAIL = os.getenv('TO_EMAIL')
+    FROM_EMAIL = os.getenv('FROM_EMAIL')
 
-    def get_irc_settings(self):
-        return {
-            'host': self.bouncer_host,
-            'port': self.bouncer_port,
-            'nickname': self.nickname,
-            'password': self.password
-        }
-
-    def get_email_settings(self):
-        return {
-            'api_key': self.mailgun_api_key,
-            'domain': self.mailgun_domain,
-            'to_email': self.to_email,
-            'from_email': self.from_email
-        }
-
-    def get_file_system_settings(self):
-        return {
-            'log_dir': self.log_dir,
-            'sent_logs_dir': self.sent_logs_dir,
-            'last_sent_day_file': self.last_sent_day_file
-        }
+    # File System Settings
+    LOG_DIR = os.getenv('LOG_DIR', 'logs')
+    SENT_LOGS_DIR = os.getenv('SENT_LOGS_DIR', 'sent_logs')
+    LAST_SENT_DAY_FILE = 'last_sent_day.txt'
 
 class IRCEventHandler:
     """Handles IRC-specific events and connection management."""
@@ -222,14 +197,12 @@ class IRCBot(IRCEventHandler, LogManager):
     and sends daily email digests of the logs using Mailgun.
     """
 
-    def __init__(self, config_manager):
+    def __init__(self):
         """Initialize the IRC bot with basic configuration."""
         self.client = irc.client.Reactor()
         self.connection = self.client.server()
         self.channels = set()
-        self.config = config_manager
-        irc_settings = self.config.get_irc_settings()
-        self.nickname = irc_settings['nickname']
+        self.nickname = Config.NICKNAME
         self.setup_logging()
         self.ensure_directories()
 
@@ -239,9 +212,8 @@ class IRCBot(IRCEventHandler, LogManager):
 
     def ensure_directories(self):
         """Create necessary directories for storing logs if they don't exist."""
-        file_system_settings = self.config.get_file_system_settings()
-        os.makedirs(file_system_settings['log_dir'], exist_ok=True)
-        os.makedirs(file_system_settings['sent_logs_dir'], exist_ok=True)
+        os.makedirs(Config.LOG_DIR, exist_ok=True)
+        os.makedirs(Config.SENT_LOGS_DIR, exist_ok=True)
 
     def connect(self):
         """
@@ -250,9 +222,8 @@ class IRCBot(IRCEventHandler, LogManager):
         Raises:
             SystemExit: If connection fails
         """
-        irc_settings = self.config.get_irc_settings()
         try:
-            self.connection.connect(irc_settings['host'], irc_settings['port'], self.nickname, password=irc_settings['password'])
+            self.connection.connect(Config.BOUNCER_HOST, Config.BOUNCER_PORT, self.nickname, password=Config.PASSWORD)
         except irc.client.ServerConnectionError as e:
             logging.error(f"Failed to connect: {e}")
             raise SystemExit(1)
@@ -323,10 +294,9 @@ class IRCBot(IRCEventHandler, LogManager):
         day_str = day.strftime('%Y-%m-%d')
         logging.info(f"Preparing to send logs for {day_str}")
 
-        file_system_settings = self.config.get_file_system_settings()
         log_files = [
-            f for f in os.listdir(file_system_settings['log_dir'])
-            if f.endswith(f"{day_str}.log") and os.path.isfile(os.path.join(file_system_settings['log_dir'], f))
+            f for f in os.listdir(Config.LOG_DIR)
+            if f.endswith(f"{day_str}.log") and os.path.isfile(os.path.join(Config.LOG_DIR, f))
         ]
 
         if not log_files:
@@ -335,24 +305,22 @@ class IRCBot(IRCEventHandler, LogManager):
 
         attachments = []
         for filename in log_files:
-            filepath = os.path.join(file_system_settings['log_dir'], filename)
+            filepath = os.path.join(Config.LOG_DIR, filename)
             with open(filepath, 'rb') as f:
                 attachments.append(('attachment', (filename, f.read())))
 
         subject = f"IRC Logs for {day_str}"
-        email_settings = self.config.get_email_settings()
         response = self.send_email(subject, f"Please find attached logs for {day_str}.", attachments)
         if response.status_code == 200:
             logging.info(f"Email sent successfully for {day_str}")
             for filename in log_files:
-                src = os.path.join(file_system_settings['log_dir'], filename)
-                dst = os.path.join(file_system_settings['sent_logs_dir'], filename)
+                src = os.path.join(Config.LOG_DIR, filename)
+                dst = os.path.join(Config.SENT_LOGS_DIR, filename)
                 os.rename(src, dst)
         else:
             logging.error(f"Failed to send email for {day_str}: {response.text}")
 
 if __name__ == "__main__":
-    config_manager = ConfigManager()
-    bot = IRCBot(config_manager)
+    bot = IRCBot()
     bot.connect()
     bot.start()
